@@ -37,11 +37,11 @@
     NSURL *staticURL = [NSURL URLWithString:@"https://jpegxl.info/logo.jxl"];
     NSURL *animatedURL = [NSURL URLWithString:@"https://jpegxl.info/anim_jxl_logo.jxl"];
     
-    [self.imageView1 sd_setImageWithURL:staticURL placeholderImage:nil options:0 context:nil progress:nil completed:^(UIImage * _Nullable image, NSError * _Nullable error, SDImageCacheType cacheType, NSURL * _Nullable imageURL) {
-        if (image) {
-            NSLog(@"%@", @"Static JPEG-XL load success");
-        }
-        // TODO, JXL encoding
+//    [self.imageView1 sd_setImageWithURL:staticURL placeholderImage:nil options:0 context:nil progress:nil completed:^(UIImage * _Nullable image, NSError * _Nullable error, SDImageCacheType cacheType, NSURL * _Nullable imageURL) {
+//        if (image) {
+//            NSLog(@"%@", @"Static JPEG-XL load success");
+//        }
+////         TODO, JXL encoding
 //        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
 //            NSUInteger maxFileSize = 4096;
 //            NSData *jxlData = [SDImageJPEGXLCoder.sharedCoder encodedDataWithImage:image format:SDImageFormatJPEGXL options:@{SDImageCoderEncodeMaxFileSize : @(maxFileSize)}];
@@ -49,18 +49,35 @@
 //                NSLog(@"%@", @"JPEG-XL encoding success");
 //            }
 //        });
-    }];
-    [self.imageView2 sd_setImageWithURL:animatedURL placeholderImage:nil completed:^(UIImage * _Nullable image, NSError * _Nullable error, SDImageCacheType cacheType, NSURL * _Nullable imageURL) {
-        if (image) {
-            NSLog(@"%@", @"Animated JPEG-XL load success");
-        }
-    }];
+//    }];
+//    [self.imageView2 sd_setImageWithURL:animatedURL placeholderImage:nil completed:^(UIImage * _Nullable image, NSError * _Nullable error, SDImageCacheType cacheType, NSURL * _Nullable imageURL) {
+//        if (image) {
+//            NSLog(@"%@", @"Animated JPEG-XL load success");
+//        }
+//    }];
+    
+    // Test JXL Encode
+    NSData *HDRData = [NSData dataWithContentsOfFile:@"/Users/lizhuoli/Desktop/iso-hdr-demo.jxl"];
+    UIImage *image = [UIImage imageWithData:HDRData];
+    [self encodeJXLWithImage:image];
 }
 
 - (void)viewWillLayoutSubviews {
     [super viewWillLayoutSubviews];
     self.imageView1.frame = CGRectMake(0, 0, self.view.bounds.size.width, self.view.bounds.size.height / 2);
     self.imageView2.frame = CGRectMake(0, self.view.bounds.size.height / 2, self.view.bounds.size.width, self.view.bounds.size.height / 2);
+}
+
+- (void)encodeJXLWithImage:(UIImage *)image {
+    NSData *data = [SDImageJPEGXLCoder.sharedCoder encodedDataWithImage:image format:SDImageFormatJPEGXL options:@{
+        SDImageCoderEncodeCompressionQuality : @0.68
+    }];
+    NSCParameterAssert(data);
+    [data writeToFile:@"/tmp/a.jxl" atomically:YES];
+    
+    CIImage *ciimage = [CIImage imageWithData:data];
+    NSString *desc = [ciimage description];
+    NSLog(@"Encoded JXL CIImage description: %@", desc);
 }
 
 - (void)didReceiveMemoryWarning {

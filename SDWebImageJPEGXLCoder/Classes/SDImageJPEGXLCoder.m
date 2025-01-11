@@ -10,8 +10,13 @@
 #if __has_include(<jxl/decode.h>) && __has_include(<jxl/encode.h>)
 #import <jxl/decode.h>
 #import <jxl/encode.h>
+#import <jxl/thread_parallel_runner.h>
 #else
 @import libjxl;
+#endif
+
+#ifndef SD_OPTIONS_CONTAINS
+#define SD_OPTIONS_CONTAINS(options, value) (((options) & (value)) == (value))
 #endif
 
 typedef void (^sd_cleanupBlock_t)(void);
@@ -24,8 +29,22 @@ extern "C" {
 }
 #endif
 
-//#define SD_TWO_CC(c1,c2) ((uint16_t)(((c2) << 8) | (c1)))
-//#define SD_FOUR_CC(c1,c2,c3,c4) ((uint32_t)(((c4) << 24) | ((c3) << 16) | ((c2) << 8) | (c1)))
+// Should moved to SDWebImage Core
+#include <sys/sysctl.h>
+static int computeHostNumPhysicalCores() {
+  uint32_t count;
+  size_t len = sizeof(count);
+  sysctlbyname("hw.physicalcpu", &count, &len, NULL, 0);
+  if (count < 1) {
+    int nm[2];
+    nm[0] = CTL_HW;
+    nm[1] = HW_AVAILCPU;
+    sysctl(nm, 2, &count, &len, NULL, 0);
+    if (count < 1)
+      return -1;
+  }
+  return count;
+}
 
 static void FreeImageData(void *info, const void *data, size_t size) {
     free((void *)data);
@@ -320,13 +339,365 @@ static void FreeImageData(void *info, const void *data, size_t size) {
 
 #pragma mark - Encode
 
-- (BOOL)canEncodeToFormat:(SDImageFormat)format { 
-    return NO;
+- (BOOL)canEncodeToFormat:(SDImageFormat)format {
+    return format == SDImageFormatJPEGXL;
 }
 
 
-- (nullable NSData *)encodedDataWithImage:(nullable UIImage *)image format:(SDImageFormat)format options:(nullable SDImageCoderOptions *)options { 
-    return nil;
+- (NSData *)encodedDataWithImage:(UIImage *)image format:(SDImageFormat)format options:(nullable SDImageCoderOptions *)options {
+    if (!image) {
+        return nil;
+    }
+    NSArray<SDImageFrame *> *frames = [SDImageCoderHelper framesFromAnimatedImage:image];
+    if (!frames || frames.count == 0) {
+        SDImageFrame *frame = [SDImageFrame frameWithImage:image duration:0];
+        frames = @[frame];
+    }
+    return [self encodedDataWithFrames:frames loopCount:image.sd_imageLoopCount format:format options:options];
+}
+
+- (NSData *)encodedDataWithFrames:(NSArray<SDImageFrame *> *)frames loopCount:(NSUInteger)loopCount format:(SDImageFormat)format options:(SDImageCoderOptions *)options {
+    UIImage *image = frames.firstObject.image; // Primary image
+    if (!image) {
+        return nil;
+    }
+    CGImageRef imageRef = image.CGImage;
+    if (!imageRef) {
+        // Earily return, supports CGImage only
+        return nil;
+    }
+    
+    NSData *data;
+    
+    double compressionQuality = 1;
+    if (options[SDImageCoderEncodeCompressionQuality]) {
+        compressionQuality = [options[SDImageCoderEncodeCompressionQuality] doubleValue];
+    }
+    CGSize maxPixelSize = CGSizeZero;
+    NSValue *maxPixelSizeValue = options[SDImageCoderEncodeMaxPixelSize];
+    if (maxPixelSizeValue != nil) {
+#if SD_MAC
+        maxPixelSize = maxPixelSizeValue.sizeValue;
+#else
+        maxPixelSize = maxPixelSizeValue.CGSizeValue;
+#endif
+    }
+    NSUInteger maxFileSize = 0;
+    if (options[SDImageCoderEncodeMaxFileSize]) {
+        maxFileSize = [options[SDImageCoderEncodeMaxFileSize] unsignedIntegerValue];
+    }
+    
+//    BOOL encodeFirstFrame = [options[SDImageCoderEncodeFirstFrameOnly] boolValue];
+//    if (encodeFirstFrame || frames.count <= 1) {
+//        
+//        // for static single webp image
+//        // Keep EXIF orientation
+//#if SD_UIKIT || SD_WATCH
+//        CGImagePropertyOrientation orientation = [SDImageCoderHelper exifOrientationFromImageOrientation:image.imageOrientation];
+//#else
+//        CGImagePropertyOrientation orientation = kCGImagePropertyOrientationUp;
+//#endif
+//        data = [self sd_encodedWebpDataWithImage:imageRef
+//                                     orientation:orientation
+//                                         quality:compressionQuality
+//                                    maxPixelSize:maxPixelSize
+//                                     maxFileSize:maxFileSize
+//                                         options:options];
+//    } else {
+//        // for animated webp image
+//        WebPMux *mux = WebPMuxNew();
+//        if (!mux) {
+//            return nil;
+//        }
+//        for (size_t i = 0; i < frames.count; i++) {
+//            SDImageFrame *currentFrame = frames[i];
+//            UIImage *currentImage = currentFrame.image;
+//            // Keep EXIF orientation
+//#if SD_UIKIT || SD_WATCH
+//            CGImagePropertyOrientation orientation = [SDImageCoderHelper exifOrientationFromImageOrientation:currentImage.imageOrientation];
+//#else
+//            CGImagePropertyOrientation orientation = kCGImagePropertyOrientationUp;
+//#endif
+//            NSData *webpData = [self sd_encodedWebpDataWithImage:currentImage.CGImage
+//                                                     orientation:orientation
+//                                                         quality:compressionQuality
+//                                                    maxPixelSize:maxPixelSize
+//                                                     maxFileSize:maxFileSize
+//                                                         options:options];
+//            int duration = currentFrame.duration * 1000;
+//            WebPMuxFrameInfo frame = { .bitstream.bytes = webpData.bytes,
+//                .bitstream.size = webpData.length,
+//                .duration = duration,
+//                .id = WEBP_CHUNK_ANMF,
+//                .dispose_method = WEBP_MUX_DISPOSE_BACKGROUND, // each frame will clear canvas
+//                .blend_method = WEBP_MUX_NO_BLEND
+//            };
+//            if (WebPMuxPushFrame(mux, &frame, 0) != WEBP_MUX_OK) {
+//                WebPMuxDelete(mux);
+//                return nil;
+//            }
+//        }
+//        
+//        WebPMuxAnimParams params = { .bgcolor = 0,
+//            .loop_count = (int)loopCount
+//        };
+//        if (WebPMuxSetAnimationParams(mux, &params) != WEBP_MUX_OK) {
+//            WebPMuxDelete(mux);
+//            return nil;
+//        }
+//        
+//        WebPData outputData;
+//        WebPMuxError error = WebPMuxAssemble(mux, &outputData);
+//        WebPMuxDelete(mux);
+//        if (error != WEBP_MUX_OK) {
+//            return nil;
+//        }
+//        data = [NSData dataWithBytes:outputData.bytes length:outputData.size];
+//        WebPDataClear(&outputData);
+//    }
+    
+#if SD_UIKIT || SD_WATCH
+    CGImagePropertyOrientation orientation = [SDImageCoderHelper exifOrientationFromImageOrientation:image.imageOrientation];
+#else
+    CGImagePropertyOrientation orientation = kCGImagePropertyOrientationUp;
+#endif
+    data = [self sd_encodedJXLDataWithImage:imageRef orientation:orientation quality:compressionQuality maxPixelSize:maxPixelSize maxFileSize:maxFileSize options:nil];
+    
+    return data;
+}
+
+// see: https://github.com/libjxl/libjxl/blob/main/lib/jxl/roundtrip_test.cc#L165
+JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
+    // increase output buffer by 64 bytes once a time
+    [compressed increaseLengthBy:64];
+    uint8_t* next_out = compressed.mutableBytes;
+    size_t avail_out = compressed.length;
+    JxlEncoderStatus process_result = JXL_ENC_NEED_MORE_OUTPUT;
+    while (process_result == JXL_ENC_NEED_MORE_OUTPUT) {
+        process_result = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
+        if (process_result == JXL_ENC_NEED_MORE_OUTPUT) {
+            size_t offset = next_out - (uint8_t *)compressed.mutableBytes;
+            // allocate more buffer
+            [compressed increaseLengthBy:compressed.length *  2];
+            next_out = (uint8_t *)compressed.mutableBytes + offset;
+            avail_out = compressed.length - offset;
+        } else if (process_result == JXL_ENC_ERROR){
+            NSLog(@"Failed to encode JXL");
+            return process_result;
+        }
+    }
+    NSCParameterAssert(process_result == JXL_ENC_SUCCESS);
+    // Reduce extra bytes
+    NSUInteger final_length = (next_out - (uint8_t *)compressed.mutableBytes);
+    [compressed setLength:final_length];
+    return JXL_ENC_SUCCESS;
+}
+
+- (nullable NSData *)sd_encodedJXLDataWithImage:(nullable CGImageRef)imageRef
+                                     orientation:(CGImagePropertyOrientation)orientation
+                                         quality:(double)quality
+                                    maxPixelSize:(CGSize)maxPixelSize
+                                     maxFileSize:(NSUInteger)maxFileSize
+                                         options:(nullable SDImageCoderOptions *)options
+{
+    if (!imageRef) {
+        return nil;
+    }
+//    // Seems libwebp has no convenient EXIF orientation API ?
+//    // Use transform to apply ourselves. Need to release before return
+//    // TODO: Use `WebPMuxSetChunk` API to write/read EXIF data, see: https://developers.google.com/speed/webp/docs/riff_container#extended_file_format
+//    __block CGImageRef rotatedCGImage = NULL;
+//    @onExit {
+//        if (rotatedCGImage) {
+//            CGImageRelease(rotatedCGImage);
+//        }
+//    };
+//    if (orientation != kCGImagePropertyOrientationUp) {
+//        rotatedCGImage = [SDImageCoderHelper CGImageCreateDecoded:imageRef orientation:orientation];
+//        NSCParameterAssert(rotatedCGImage);
+//        imageRef = rotatedCGImage;
+//    }
+    
+    size_t width = CGImageGetWidth(imageRef);
+    size_t height = CGImageGetHeight(imageRef);
+    size_t bitsPerComponent = CGImageGetBitsPerComponent(imageRef);
+    size_t bitsPerPixel = CGImageGetBitsPerPixel(imageRef);
+    size_t components = bitsPerPixel / bitsPerComponent;
+    size_t bytesPerRow = CGImageGetBytesPerRow(imageRef);
+    CGBitmapInfo bitmapInfo = CGImageGetBitmapInfo(imageRef);
+    CGImageAlphaInfo alphaInfo = bitmapInfo & kCGBitmapAlphaInfoMask;
+    CGBitmapInfo byteOrderInfo = bitmapInfo & kCGBitmapByteOrderMask;
+    BOOL hasAlpha = !(alphaInfo == kCGImageAlphaNone ||
+                      alphaInfo == kCGImageAlphaNoneSkipFirst ||
+                      alphaInfo == kCGImageAlphaNoneSkipLast);
+    BOOL byteOrderNormal = NO;
+    switch (byteOrderInfo) {
+        case kCGBitmapByteOrderDefault: {
+            byteOrderNormal = YES;
+        } break;
+        case kCGBitmapByteOrder32Little: {
+        } break;
+        case kCGBitmapByteOrder32Big: {
+            byteOrderNormal = YES;
+        } break;
+        default: break;
+    }
+    // If we can not get bitmap buffer, early return
+    CGDataProviderRef dataProvider = CGImageGetDataProvider(imageRef);
+    if (!dataProvider) {
+        return nil;
+    }
+    
+    NSData *buffer = (__bridge_transfer NSData *) CGDataProviderCopyData(dataProvider);
+    if (!buffer) {
+        return nil;
+    }
+    
+    // We must prefer the input CGImage's color space, which may contains ICC profile
+    CGColorSpaceRef colorSpace = CGImageGetColorSpace(imageRef);
+    // We only supports RGB colorspace, filter the un-supported one (like Monochrome, CMYK, etc)
+    if (CGColorSpaceGetModel(colorSpace) != kCGColorSpaceModelRGB) {
+        // Ignore and convert, we don't know how to encode this colorspace directlly to WebP
+        // This may cause little visible difference because of colorpsace conversion
+        colorSpace = NULL;
+    }
+    if (!colorSpace) {
+        colorSpace = [SDImageCoderHelper colorSpaceGetDeviceRGB];
+    }
+    CGColorRenderingIntent renderingIntent = CGImageGetRenderingIntent(imageRef);
+//    uint8_t *rgba = NULL; // RGBA Buffer managed by CFData, don't call `free` on it, instead call `CFRelease` on `dataRef`
+//    vImage_CGImageFormat destFormat = {
+//        .bitsPerComponent = 8,
+//        .bitsPerPixel = hasAlpha ? 32 : 24,
+//        .colorSpace = colorSpace,
+//        .bitmapInfo = hasAlpha ? kCGImageAlphaLast | kCGBitmapByteOrderDefault : kCGImageAlphaNone | kCGBitmapByteOrderDefault, // RGB888/RGBA8888 (Non-premultiplied to works for libwebp)
+//        .renderingIntent = renderingIntent
+//    };
+//    vImage_Buffer dest;
+//    // We could not assume that input CGImage's color mode is always RGB888/RGBA8888. Convert all other cases to target color mode using vImage
+//    // But vImageBuffer_InitWithCGImage will do convert automatically (unless you use `kvImageNoAllocate`), so no need to call `vImageConvert` by ourselves
+//    vImage_Error error = vImageBuffer_InitWithCGImage(&dest, &destFormat, NULL, imageRef, kvImageNoFlags);
+//    if (error != kvImageNoError) {
+//        return nil;
+//    }
+//    rgba = dest.data;
+//    bytesPerRow = dest.rowBytes;
+    
+    JxlBasicInfo info;
+    JxlColorEncoding jxl_color;
+    JxlPixelFormat jxl_fmt;
+    JxlEncoderStatus jret;
+    
+    // encoder
+    JxlEncoder* enc = JxlEncoderCreate(NULL);
+    if (!enc) {
+        return nil;
+    }
+    
+    /* populate the basic info settings */
+    JxlEncoderInitBasicInfo(&info);
+    
+    jxl_fmt.num_channels = (uint32_t)components;
+    info.xsize = (uint32_t)width;
+    info.ysize = (uint32_t)height;
+    info.num_extra_channels = (jxl_fmt.num_channels + 1) % 2;
+    info.num_color_channels = jxl_fmt.num_channels - info.num_extra_channels;
+    info.bits_per_sample = bitsPerPixel / jxl_fmt.num_channels;
+    info.alpha_bits = (info.num_extra_channels > 0) * info.bits_per_sample;
+    // floating point
+    if (SD_OPTIONS_CONTAINS(bitmapInfo, kCGBitmapFloatComponents)) {
+        info.exponent_bits_per_sample = info.bits_per_sample > 16 ? 8 : 5;
+        info.alpha_exponent_bits = info.alpha_bits ? info.exponent_bits_per_sample : 0;
+        jxl_fmt.data_type = info.bits_per_sample > 16 ? JXL_TYPE_FLOAT : JXL_TYPE_FLOAT16;
+    } else {
+        info.exponent_bits_per_sample = 0;
+        info.alpha_exponent_bits = 0;
+        jxl_fmt.data_type = info.bits_per_sample <= 8 ? JXL_TYPE_UINT8 : JXL_TYPE_UINT16;
+    }
+    // EXIF orientation, matched
+    info.orientation = (JxlOrientation)orientation;
+    // default endian (little)
+    jxl_fmt.endianness = JXL_NATIVE_ENDIAN;
+    // convert JPEG quality (0-100) to JXL distance
+    float distance = JxlEncoderDistanceFromQuality(quality * 100.0);
+    /* bitexact lossless requires there to be no XYB transform */
+    info.uses_original_profile = distance == 0.0;
+    /* rendering intent doesn't matter here
+     * but libjxl will whine if we don't set it */
+    JxlRenderingIntent render_indent;
+    switch (renderingIntent) {
+        case kCGRenderingIntentDefault:
+        case kCGRenderingIntentRelativeColorimetric:
+            render_indent = JXL_RENDERING_INTENT_RELATIVE;
+            break;
+        case kCGRenderingIntentAbsoluteColorimetric:
+            render_indent = JXL_RENDERING_INTENT_ABSOLUTE;
+            break;
+        case kCGRenderingIntentPerceptual:
+            render_indent = JXL_RENDERING_INTENT_PERCEPTUAL;
+            break;
+        case kCGRenderingIntentSaturation:
+            render_indent = JXL_RENDERING_INTENT_SATURATION;
+            break;
+    }
+    jxl_color.rendering_intent = render_indent;
+    
+    // CGImage has its own alignment, since we don't use vImage to re-align the input buffer, don't apply here
+    jxl_fmt.align = 0;
+    
+    jret = JxlEncoderSetBasicInfo(enc, &info);
+    if (jret != JXL_ENC_SUCCESS) {
+        JxlEncoderDestroy(enc);
+        return nil;
+    }
+    
+    jxl_color.color_space = JXL_COLOR_SPACE_RGB;
+    // ICC Profile
+    NSData *iccProfile = (__bridge_transfer NSData *)CGColorSpaceCopyICCProfile(colorSpace);
+    jret = JxlEncoderSetICCProfile(enc, iccProfile.bytes, iccProfile.length);
+    if (jret != JXL_ENC_SUCCESS) {
+        JxlEncoderDestroy(enc);
+        return nil;
+    }
+    
+    /* This needs to be set each time the decoder is reset */
+    JxlEncoderFrameSettings* frame_settings = JxlEncoderFrameSettingsCreate(enc, NULL);
+    jret = JxlEncoderSetFrameDistance(frame_settings, distance);
+//    JxlEncoderSetExtraChannelDistance(frame_settings, distance);
+    if (jret != JXL_ENC_SUCCESS) {
+        JxlEncoderDestroy(enc);
+        return nil;
+    }
+    
+   /* This needs to be set each time the decoder is reset */
+    size_t threadCount = computeHostNumPhysicalCores();
+    void* runner = JxlThreadParallelRunnerCreate(NULL, threadCount);
+    jret = JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner);
+    if (jret != JXL_ENC_SUCCESS) {
+        JxlEncoderDestroy(enc);
+        return nil;
+    }
+    
+    // Add bitmap buffer
+    jret = JxlEncoderAddImageFrame(frame_settings, &jxl_fmt,
+                            buffer.bytes,
+                            buffer.length);
+    if (jret != JXL_ENC_SUCCESS) {
+        JxlEncoderDestroy(enc);
+        return nil;
+    }
+    JxlEncoderCloseInput(enc);
+    
+    // libjxp support incremental encoding, but we just wait it finished
+    NSMutableData *output = [NSMutableData data];
+    jret = EncodeWithEncoder(enc, output);
+    
+    /*
+     * destroying the decoder also frees JxlEncoderFrameSettings
+     */
+    JxlEncoderDestroy(enc);
+    
+    return output;
 }
 
 @end
