@@ -31,10 +31,10 @@ extern "C" {
 
 // Should moved to SDWebImage Core
 #include <sys/sysctl.h>
-static int computeHostNumPhysicalCores() {
+static int computeHostNumLogicalCores(void) {
   uint32_t count;
   size_t len = sizeof(count);
-  sysctlbyname("hw.physicalcpu", &count, &len, NULL, 0);
+  sysctlbyname("hw.logicalcpu", &count, &len, NULL, 0);
   if (count < 1) {
     int nm[2];
     nm[0] = CTL_HW;
@@ -373,20 +373,8 @@ static void FreeImageData(void *info, const void *data, size_t size) {
     if (options[SDImageCoderEncodeCompressionQuality]) {
         compressionQuality = [options[SDImageCoderEncodeCompressionQuality] doubleValue];
     }
-    CGSize maxPixelSize = CGSizeZero;
-    NSValue *maxPixelSizeValue = options[SDImageCoderEncodeMaxPixelSize];
-    if (maxPixelSizeValue != nil) {
-#if SD_MAC
-        maxPixelSize = maxPixelSizeValue.sizeValue;
-#else
-        maxPixelSize = maxPixelSizeValue.CGSizeValue;
-#endif
-    }
-    NSUInteger maxFileSize = 0;
-    if (options[SDImageCoderEncodeMaxFileSize]) {
-        maxFileSize = [options[SDImageCoderEncodeMaxFileSize] unsignedIntegerValue];
-    }
     
+    // TODO: Animated JPEG-XL Encoding support
 //    BOOL encodeFirstFrame = [options[SDImageCoderEncodeFirstFrameOnly] boolValue];
 //    if (encodeFirstFrame || frames.count <= 1) {
 //        
@@ -461,7 +449,7 @@ static void FreeImageData(void *info, const void *data, size_t size) {
 #else
     CGImagePropertyOrientation orientation = kCGImagePropertyOrientationUp;
 #endif
-    data = [self sd_encodedJXLDataWithImage:imageRef orientation:orientation quality:compressionQuality maxPixelSize:maxPixelSize maxFileSize:maxFileSize options:nil];
+    data = [self sd_encodedJXLDataWithImage:imageRef orientation:orientation quality:compressionQuality options:options];
     
     return data;
 }
@@ -494,11 +482,9 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
 }
 
 - (nullable NSData *)sd_encodedJXLDataWithImage:(nullable CGImageRef)imageRef
-                                     orientation:(CGImagePropertyOrientation)orientation
-                                         quality:(double)quality
-                                    maxPixelSize:(CGSize)maxPixelSize
-                                     maxFileSize:(NSUInteger)maxFileSize
-                                         options:(nullable SDImageCoderOptions *)options
+                                    orientation:(CGImagePropertyOrientation)orientation
+                                        quality:(double)quality
+                                        options:(NSDictionary *)options
 {
     if (!imageRef) {
         return nil;
@@ -586,7 +572,7 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
     JxlBasicInfo info;
     JxlColorEncoding jxl_color;
     JxlPixelFormat jxl_fmt;
-    JxlEncoderStatus jret;
+    __block JxlEncoderStatus jret;
     
     // encoder
     JxlEncoder* enc = JxlEncoderCreate(NULL);
@@ -597,12 +583,28 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
     /* populate the basic info settings */
     JxlEncoderInitBasicInfo(&info);
     
+    /* Parse the extra options */
+    NSDictionary *frameSetting = options[SDImageCoderEncodeJXLFrameSetting];
+    BOOL loseless = options[SDImageCoderEncodeJXLLoseless] ? [options[SDImageCoderEncodeJXLLoseless] boolValue] : NO;
+    int codeStreamLevel = options[SDImageCoderEncodeJXLCodeStreamLevel] ? [options[SDImageCoderEncodeJXLCodeStreamLevel] intValue] : -1;
+    
+    float distance;
+    if (options[SDImageCoderEncodeJXLDistance] != nil) {
+        // prefer JXL distance
+        distance = [options[SDImageCoderEncodeJXLDistance] floatValue];
+    } else {
+        // convert JPEG quality (0-100) to JXL distance
+        distance = JxlEncoderDistanceFromQuality(quality * 100.0);
+    }
+    /* bitexact lossless requires there to be no XYB transform */
+    info.uses_original_profile = distance == 0.0;
+    
     jxl_fmt.num_channels = (uint32_t)components;
     info.xsize = (uint32_t)width;
     info.ysize = (uint32_t)height;
     info.num_extra_channels = (jxl_fmt.num_channels + 1) % 2;
     info.num_color_channels = jxl_fmt.num_channels - info.num_extra_channels;
-    info.bits_per_sample = bitsPerPixel / jxl_fmt.num_channels;
+    info.bits_per_sample = (uint32_t)bitsPerPixel / jxl_fmt.num_channels;
     info.alpha_bits = (info.num_extra_channels > 0) * info.bits_per_sample;
     // floating point
     if (SD_OPTIONS_CONTAINS(bitmapInfo, kCGBitmapFloatComponents)) {
@@ -618,10 +620,6 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
     info.orientation = (JxlOrientation)orientation;
     // default endian (little)
     jxl_fmt.endianness = JXL_NATIVE_ENDIAN;
-    // convert JPEG quality (0-100) to JXL distance
-    float distance = JxlEncoderDistanceFromQuality(quality * 100.0);
-    /* bitexact lossless requires there to be no XYB transform */
-    info.uses_original_profile = distance == 0.0;
     /* rendering intent doesn't matter here
      * but libjxl will whine if we don't set it */
     JxlRenderingIntent render_indent;
@@ -662,23 +660,47 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
     
     /* This needs to be set each time the decoder is reset */
     JxlEncoderFrameSettings* frame_settings = JxlEncoderFrameSettingsCreate(enc, NULL);
-    jret = JxlEncoderSetFrameDistance(frame_settings, distance);
-//    JxlEncoderSetExtraChannelDistance(frame_settings, distance);
+    jret |= JxlEncoderSetFrameDistance(frame_settings, distance);
+    /* Set lossless */
+    jret |= JxlEncoderSetFrameLossless(frame_settings, loseless ? 1 : 0);
+    /* Set code steram level */
+    jret |= JxlEncoderSetCodestreamLevel(enc, codeStreamLevel);
+    
+    /* Set extra frame setting */
+    [frameSetting enumerateKeysAndObjectsUsingBlock:^(NSNumber * _Nonnull key, NSNumber * _Nonnull value, BOOL * _Nonnull stop) {
+        JxlEncoderFrameSettingId frame_key = key.unsignedIntValue;
+        // check the value is floating point or integer
+        if ([[value stringValue] containsString:@"."]) {
+            // floating point value
+            double frame_value = value.doubleValue;
+            jret |= JxlEncoderFrameSettingsSetFloatOption(frame_settings, frame_key, frame_value);
+        } else {
+            // integer value
+            int64_t frame_value = value.integerValue;
+            jret |= JxlEncoderFrameSettingsSetOption(frame_settings, frame_key, frame_value);
+        }
+    }];
+
     if (jret != JXL_ENC_SUCCESS) {
         JxlEncoderDestroy(enc);
         return nil;
     }
     
-   /* This needs to be set each time the decoder is reset */
-    size_t threadCount = computeHostNumPhysicalCores();
-    void* runner = JxlThreadParallelRunnerCreate(NULL, threadCount);
-    jret = JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner);
-    if (jret != JXL_ENC_SUCCESS) {
-        JxlEncoderDestroy(enc);
-        return nil;
+    /* This needs to be set each time the decoder is reset */
+    size_t threadCount = [options[SDImageCoderEncodeJXLThreadCount] unsignedIntValue];
+    if (threadCount == 0) {
+        threadCount = computeHostNumLogicalCores();
+    }
+    if (threadCount > 1) {
+        void* runner = JxlThreadParallelRunnerCreate(NULL, threadCount);
+        jret = JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner);
+        if (jret != JXL_ENC_SUCCESS) {
+            JxlEncoderDestroy(enc);
+            return nil;
+        }
     }
     
-    // Add bitmap buffer
+    /* Add frame bitmap buffer */
     jret = JxlEncoderAddImageFrame(frame_settings, &jxl_fmt,
                             buffer.bytes,
                             buffer.length);
@@ -688,7 +710,7 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
     }
     JxlEncoderCloseInput(enc);
     
-    // libjxp support incremental encoding, but we just wait it finished
+    /* libjxp support incremental encoding, but we just wait it until finished */
     NSMutableData *output = [NSMutableData data];
     jret = EncodeWithEncoder(enc, output);
     
@@ -701,3 +723,10 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
 }
 
 @end
+
+#pragma mark - JXL Encode Options
+SDImageCoderOption SDImageCoderEncodeJXLDistance = @"encodeJXLDistance";
+SDImageCoderOption SDImageCoderEncodeJXLLoseless = @"encodeJXLLoseless";
+SDImageCoderOption SDImageCoderEncodeJXLCodeStreamLevel = @"encodeJXLCodeStreamLevel";
+SDImageCoderOption SDImageCoderEncodeJXLFrameSetting = @"encodeJXLFrameSetting";
+SDImageCoderOption SDImageCoderEncodeJXLThreadCount = @"encodeJXLThreadCount";
