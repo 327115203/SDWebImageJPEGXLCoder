@@ -15,8 +15,8 @@ This coder supports the HDR/SDR decoding, as well as JPEG-XL aniamted image.
 ## Notes
 
 1. This coder supports animation via UIImageView/NSImageView, no SDAnimatedImageView currently (Because the current coder API need codec supports non-sequential frame decoding, but libjxl does not have. Will remove this limit in SDWebImage 6.0)
-2. This coder does not supports JPEG-XL encoding (Because I have no time :))
-3. Apple's ImageIO supports JPEGXL decoding from iOS 17/tvOS 17/watchOS 10/macOS 14 (via: [WWDC2023](https://developer.apple.com/videos/play/wwdc2023/10122/)), so SDWebImage on those platform can also decode JPEGXL images using `SDImageIOCoder` (but no animated JPEG-XL support)
+2. Apple's ImageIO supports JPEGXL decoding from iOS 17/tvOS 17/watchOS 10/macOS 14 (via: [WWDC2023](https://developer.apple.com/videos/play/wwdc2023/10122/)), so SDWebImage on those platform can also decode JPEGXL images using `SDImageIOCoder` (but no animated JPEG-XL support)
+3. From v0.2.0, this coder support JXL encoding, including HDR, static JXL, animated JXL encoding as well (a huge work...)
 
 ## Requirements
 
@@ -101,6 +101,102 @@ imageView.sd_setImage(with: JPEGXLURL)
 ```
 
 Note: You can also test animated JPEG-XL on UIImageView/NSImageView and WebImage (via SwiftUI port)
+
+### Decoding
+
++ Objective-C
+
+```objective-c
+// JPEGXL image decoding
+NSData *JPEGXLData;
+UIImage *image = [[SDImageJPEGXLCoder sharedCoder] decodedImageWithData:JPEGXLData options:nil];
+```
+
++ Swift
+
+```swift
+// JPEGXL image decoding
+let JPEGXLData: Data
+let image = SDImageJPEGXLCoder.shared.decodedImage(with: data, options: nil)
+```
+
+### Encoding
+
++ Objective-c
+
+```objective-c
+// JPEGXL image encoding
+UIImage *image;
+NSData *JPEGXLData = [[SDImageJPEGXLCoder sharedCoder] encodedDataWithImage:image format:SDImageFormatJPEGXL options:nil];
+// Encode Quality
+NSData *lossyJPEGXLData = [[SDImageJPEGXLCoder sharedCoder] encodedDataWithImage:image format:SDImageFormatJPEGXL options:@{SDImageCoderEncodeCompressionQuality : @(0.1)}]; // [0, 1] compression quality
+```
+
++ Swift
+
+```swift
+// JPEGXL image encoding
+let image: UIImage
+let JPEGXLData = SDImageJPEGXLCoder.shared.encodedData(with: image, format: .jpegxl, options: nil)
+// Encode Quality
+let lossyJPEGXLData = SDImageJPEGXLCoder.shared.encodedData(with: image, format: .jpegxl, options: [.encodeCompressionQuality: 0.1]) // [0, 1] compression quality
+```
+
+### Animated JPEG-XL Encoding
+
++ Objective-c
+
+```objective-c
+// Animated encoding
+NSMutableArray<SDImageFrames *> *frames = [NSMutableArray array];
+for (size_t i = 0; i < images.count; i++) {
+    SDImageFrame *frame = [SDImageFrame frameWithImage:images[i] duration:0.1];
+    [frames appendObject:frame];
+}
+NSData *animatedData = [[SDImageJPEGXLCoder sharedCoder] encodedDataWithFrames:frames loopCount:0 format:SDImageFormatJPEGXL options:nil];
+```
+
++ Swift
+
+```swift
+// Animated encoding
+var frames: [SDImageFrame] = []
+for i in 0..<images.count {
+    let frame = SDImageFrame(image: images[i], duration: 0.1)
+    frames.append(frame)
+}
+let animatedData = SDImageJPEGXLCoder.shared.encodedData(with: frames, loopCount: 0, format: .jpegxl, options: nil)
+```
+
+### Advanced jxl codec options
+
+For advanced user who want detailed control like `cjxl` command line tool, you can pass the underlying encode options in 
+
++ Objective-C
+
+```objective-c
+NSDictionary *frameSetting = @{
+    @(JXL_ENC_FRAME_SETTING_EFFORT) : @(10),
+    @(JXL_ENC_FRAME_SETTING_BROTLI_EFFORT) : @(11)
+};
+NSData *data = [SDImageJPEGXLCoder.sharedCoder encodedDataWithImage:image format:SDImageFormatJPEGXL options:@{
+    SDImageCoderEncodeJXLDistance : @(3.0), // jxl -distance
+    SDImageCoderEncodeJXLFrameSetting : frameSetting, // jxl -effort
+}];
+```
+
++ Swift
+
+```swift
+let frameSetting = [
+    JXL_ENC_FRAME_SETTING_EFFORT.rawValue : 10,
+    JXL_ENC_FRAME_SETTING_BROTLI_EFFORT.rawValue : 11
+]
+let data = SDImageJPEGXLCoder.shared.encodedData(with: image, format: .jpegxl, options: [
+    .encodeJXLDistance : 3.0, // jxl -distance
+    .encodeJXLFrameSetting : frameSetting, // jxl -effort
+]);
+```
 
 ## Example
 
