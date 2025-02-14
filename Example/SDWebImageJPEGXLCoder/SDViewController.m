@@ -35,27 +35,44 @@
     self.imageView2.contentMode = UIViewContentModeScaleAspectFit;
     [self.view addSubview:self.imageView2];
     
-    NSURL *staticURL = [NSURL URLWithString:@"https://jpegxl.info/logo.jxl"];
-    NSURL *animatedURL = [NSURL URLWithString:@"https://jpegxl.info/anim_jxl_logo.jxl"];
+    NSURL *staticURL = [NSURL URLWithString:@"https://jpegxl.info/images/dice.jxl"];
+    NSURL *animatedURL = [NSURL URLWithString:@"https://jpegxl.info/images/anim-icos.jxl"];
     
     [self.imageView1 sd_setImageWithURL:staticURL placeholderImage:nil options:0 context:nil progress:nil completed:^(UIImage * _Nullable image, NSError * _Nullable error, SDImageCacheType cacheType, NSURL * _Nullable imageURL) {
         if (image) {
             NSLog(@"%@", @"Static JPEG-XL load success");
         }
-//         TODO, JXL encoding
+        // static JXL encoding
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             NSUInteger maxFileSize = 4096;
             NSData *jxlData = [SDImageJPEGXLCoder.sharedCoder encodedDataWithImage:image format:SDImageFormatJPEGXL options:@{SDImageCoderEncodeMaxFileSize : @(maxFileSize)}];
             if (jxlData) {
-                NSLog(@"%@", @"JPEG-XL encoding success");
+                NSLog(@"Static JPEG-XL encode success, bytes: %lu", (unsigned long)jxlData.length);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    UIImage *animatedImage = [UIImage sd_imageWithData:jxlData];
+                    self.imageView2.image = animatedImage;
+                });
             }
         });
     }];
-    [self.imageView2 sd_setImageWithURL:animatedURL placeholderImage:nil completed:^(UIImage * _Nullable image, NSError * _Nullable error, SDImageCacheType cacheType, NSURL * _Nullable imageURL) {
-        if (image) {
-            NSLog(@"%@", @"Animated JPEG-XL load success");
-        }
-    }];
+//    [self.imageView2 sd_setImageWithURL:animatedURL placeholderImage:nil completed:^(UIImage * _Nullable image, NSError * _Nullable error, SDImageCacheType cacheType, NSURL * _Nullable imageURL) {
+//        if (image) {
+//            NSLog(@"%@", @"Animated JPEG-XL load success");
+//        }
+//        // animated JXL encoding
+//        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+//            NSData *jxlData = [SDImageJPEGXLCoder.sharedCoder encodedDataWithImage:image format:SDImageFormatJPEGXL options:@{
+//                SDImageCoderEncodeJXLDistance : @(3.0),
+//            }];
+//            if (jxlData) {
+//                NSLog(@"Animated JPEG-XL encode success, bytes: %lu", (unsigned long)jxlData.length);
+//                dispatch_async(dispatch_get_main_queue(), ^{
+//                    UIImage *animatedImage = [UIImage sd_imageWithData:jxlData];
+//                    self.imageView1.image = animatedImage;
+//                });
+//            }
+//        });
+//    }];
     
     [self testHDREncoding];
 }
@@ -79,13 +96,13 @@
 - (void)encodeJXLWithImage:(UIImage *)image {
     NSCParameterAssert(image);
     NSDictionary *frameSetting = @{
-        @(JXL_ENC_FRAME_SETTING_EFFORT) : @(1),
-        @(JXL_ENC_FRAME_SETTING_BROTLI_EFFORT) : @(0)
+        @(JXL_ENC_FRAME_SETTING_EFFORT) : @(10),
+        @(JXL_ENC_FRAME_SETTING_BROTLI_EFFORT) : @(11)
     };
     // fastest encoding speed but largest compressed size, you can adjust options here
     NSData *data = [SDImageJPEGXLCoder.sharedCoder encodedDataWithImage:image format:SDImageFormatJPEGXL options:@{
 //        SDImageCoderEncodeCompressionQuality : @0.68,
-        SDImageCoderEncodeJXLDistance : @(1.0),
+        SDImageCoderEncodeJXLDistance : @(3.0),
         SDImageCoderEncodeJXLFrameSetting : frameSetting,
     }];
     NSCParameterAssert(data);

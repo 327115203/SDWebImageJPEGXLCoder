@@ -247,11 +247,12 @@ static void FreeImageData(void *info, const void *data, size_t size) {
     // Calculate duration, this is `tick`
     // We need tps (tick per second) to calculate
     NSTimeInterval duration = (double)header.duration * info.animation.tps_denominator / info.animation.tps_numerator;
-    if (duration < 0.1) {
-        // Should we still try to keep broswer behavior to limit 100ms ?
-        // Like GIF/WebP ?
-        return 0.1;
-    }
+    // Allows for now, some jxls use 1/1000 tick per seconds, render 50 ticks per-frame.
+//    if (duration < 0.1) {
+//        // Should we still try to keep broswer behavior to limit 100ms ?
+//        // Like GIF/WebP ?
+//        return 0.1;
+//    }
     return duration;
 }
 
@@ -366,92 +367,92 @@ static void FreeImageData(void *info, const void *data, size_t size) {
         // Earily return, supports CGImage only
         return nil;
     }
-    
-    NSData *data;
-    
-    double compressionQuality = 1;
-    if (options[SDImageCoderEncodeCompressionQuality]) {
-        compressionQuality = [options[SDImageCoderEncodeCompressionQuality] doubleValue];
-    }
-    
-    // TODO: Animated JPEG-XL Encoding support
-//    BOOL encodeFirstFrame = [options[SDImageCoderEncodeFirstFrameOnly] boolValue];
-//    if (encodeFirstFrame || frames.count <= 1) {
-//        
-//        // for static single webp image
-//        // Keep EXIF orientation
-//#if SD_UIKIT || SD_WATCH
-//        CGImagePropertyOrientation orientation = [SDImageCoderHelper exifOrientationFromImageOrientation:image.imageOrientation];
-//#else
-//        CGImagePropertyOrientation orientation = kCGImagePropertyOrientationUp;
-//#endif
-//        data = [self sd_encodedWebpDataWithImage:imageRef
-//                                     orientation:orientation
-//                                         quality:compressionQuality
-//                                    maxPixelSize:maxPixelSize
-//                                     maxFileSize:maxFileSize
-//                                         options:options];
-//    } else {
-//        // for animated webp image
-//        WebPMux *mux = WebPMuxNew();
-//        if (!mux) {
-//            return nil;
-//        }
-//        for (size_t i = 0; i < frames.count; i++) {
-//            SDImageFrame *currentFrame = frames[i];
-//            UIImage *currentImage = currentFrame.image;
-//            // Keep EXIF orientation
-//#if SD_UIKIT || SD_WATCH
-//            CGImagePropertyOrientation orientation = [SDImageCoderHelper exifOrientationFromImageOrientation:currentImage.imageOrientation];
-//#else
-//            CGImagePropertyOrientation orientation = kCGImagePropertyOrientationUp;
-//#endif
-//            NSData *webpData = [self sd_encodedWebpDataWithImage:currentImage.CGImage
-//                                                     orientation:orientation
-//                                                         quality:compressionQuality
-//                                                    maxPixelSize:maxPixelSize
-//                                                     maxFileSize:maxFileSize
-//                                                         options:options];
-//            int duration = currentFrame.duration * 1000;
-//            WebPMuxFrameInfo frame = { .bitstream.bytes = webpData.bytes,
-//                .bitstream.size = webpData.length,
-//                .duration = duration,
-//                .id = WEBP_CHUNK_ANMF,
-//                .dispose_method = WEBP_MUX_DISPOSE_BACKGROUND, // each frame will clear canvas
-//                .blend_method = WEBP_MUX_NO_BLEND
-//            };
-//            if (WebPMuxPushFrame(mux, &frame, 0) != WEBP_MUX_OK) {
-//                WebPMuxDelete(mux);
-//                return nil;
-//            }
-//        }
-//        
-//        WebPMuxAnimParams params = { .bgcolor = 0,
-//            .loop_count = (int)loopCount
-//        };
-//        if (WebPMuxSetAnimationParams(mux, &params) != WEBP_MUX_OK) {
-//            WebPMuxDelete(mux);
-//            return nil;
-//        }
-//        
-//        WebPData outputData;
-//        WebPMuxError error = WebPMuxAssemble(mux, &outputData);
-//        WebPMuxDelete(mux);
-//        if (error != WEBP_MUX_OK) {
-//            return nil;
-//        }
-//        data = [NSData dataWithBytes:outputData.bytes length:outputData.size];
-//        WebPDataClear(&outputData);
-//    }
-    
+    // Keep EXIF orientation
 #if SD_UIKIT || SD_WATCH
     CGImagePropertyOrientation orientation = [SDImageCoderHelper exifOrientationFromImageOrientation:image.imageOrientation];
 #else
     CGImagePropertyOrientation orientation = kCGImagePropertyOrientationUp;
 #endif
-    data = [self sd_encodedJXLDataWithImage:imageRef orientation:orientation quality:compressionQuality options:options];
+    // Compression distance
+    float distance;
+    if (options[SDImageCoderEncodeJXLDistance] != nil) {
+        // prefer JXL distance
+        distance = [options[SDImageCoderEncodeJXLDistance] floatValue];
+    } else {
+        // convert JPEG quality (0-100) to JXL distance
+        double compressionQuality = 1;
+        if (options[SDImageCoderEncodeCompressionQuality]) {
+            compressionQuality = [options[SDImageCoderEncodeCompressionQuality] doubleValue];
+        }
+        distance = JxlEncoderDistanceFromQuality(compressionQuality * 100.0);
+    }
     
-    return data;
+    NSMutableData *output = [NSMutableData data];
+    BOOL success = NO;
+    
+    // finished basic Animated JPEG-XL Encoding support
+    // thanks: https://github.com/FFmpeg/FFmpeg/commit/f3c408264554211b7a4c729d5fe482d633bac01a
+    BOOL encodeFirstFrame = [options[SDImageCoderEncodeFirstFrameOnly] boolValue];
+    BOOL hasAnimation = !encodeFirstFrame && frames.count > 1;
+    
+    // encoder context (which need be shared by static/animated encoding)
+    JxlEncoder* enc = JxlEncoderCreate(NULL);
+    if (!enc) {
+        return nil;
+    }
+    JxlEncoderFrameSettings* frame_settings = JxlEncoderFrameSettingsCreate(enc, NULL);
+    // setup basic info for whole encoding
+    JxlEncoderStatus jret = SetupEncoderForPrimaryImage(enc, frame_settings, imageRef, orientation, distance, hasAnimation, loopCount, options);
+    if (jret != JXL_ENC_SUCCESS) {
+        JxlEncoderDestroy(enc);
+        return nil;
+    }
+    
+    if (!hasAnimation) {
+        // for static single jxl
+        success = [self sd_encodeFrameWithEnc:enc frameSettings:frame_settings frame:imageRef orientation:orientation duration:0 options:options output:output];
+        if (!success) {
+            JxlEncoderDestroy(enc);
+            return nil;
+        }
+        // finish input and ready for output
+        JxlEncoderCloseInput(enc);
+        /* libjxl support incremental encoding, but we just wait it until finished */
+        jret = EncodeWithEncoder(enc, output);
+    } else {
+        // for animated jxl
+        for (size_t i = 0; i < frames.count; i++) {
+            SDImageFrame *currentFrame = frames[i];
+            UIImage *currentImage = currentFrame.image;
+            double duration = currentFrame.duration;
+            
+            success = [self sd_encodeFrameWithEnc:enc frameSettings:frame_settings frame:currentImage.CGImage orientation:orientation duration:duration options:options output:output];
+            // earily break
+            if (!success) {
+                JxlEncoderDestroy(enc);
+                return nil;
+            }
+            // last frame
+            if (i == frames.count - 1) {
+                // finish input and ready for output
+                JxlEncoderCloseInput(enc);
+            }
+            /* libjxl support incremental encoding, but we just wait it until finished */
+            NSMutableData *frameOutput = [[NSMutableData alloc] init];
+            jret = EncodeWithEncoder(enc, frameOutput);
+            // append the frame output to the final output
+            [output appendData:frameOutput];
+        }
+    }
+    
+    // destroying the decoder also frees JxlEncoderFrameSettings
+//    free(frame_settings);
+    JxlEncoderDestroy(enc);
+    
+    if (jret != JXL_ENC_SUCCESS) {
+        return nil;
+    }
+    return output;
 }
 
 // see: https://github.com/libjxl/libjxl/blob/main/lib/jxl/roundtrip_test.cc#L165
@@ -481,39 +482,18 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
     return JXL_ENC_SUCCESS;
 }
 
-- (nullable NSData *)sd_encodedJXLDataWithImage:(nullable CGImageRef)imageRef
-                                    orientation:(CGImagePropertyOrientation)orientation
-                                        quality:(double)quality
-                                        options:(NSDictionary *)options
-{
-    if (!imageRef) {
-        return nil;
-    }
-//    // Seems libwebp has no convenient EXIF orientation API ?
-//    // Use transform to apply ourselves. Need to release before return
-//    // TODO: Use `WebPMuxSetChunk` API to write/read EXIF data, see: https://developers.google.com/speed/webp/docs/riff_container#extended_file_format
-//    __block CGImageRef rotatedCGImage = NULL;
-//    @onExit {
-//        if (rotatedCGImage) {
-//            CGImageRelease(rotatedCGImage);
-//        }
-//    };
-//    if (orientation != kCGImagePropertyOrientationUp) {
-//        rotatedCGImage = [SDImageCoderHelper CGImageCreateDecoded:imageRef orientation:orientation];
-//        NSCParameterAssert(rotatedCGImage);
-//        imageRef = rotatedCGImage;
-//    }
-    
+JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderFrameSettings *frame_settings, CGImageRef imageRef, CGImagePropertyOrientation orientation, float distance, BOOL hasAnimation, NSUInteger loopCount, NSDictionary *options) {
+    // bitmap info from CGImage
     size_t width = CGImageGetWidth(imageRef);
     size_t height = CGImageGetHeight(imageRef);
     size_t bitsPerComponent = CGImageGetBitsPerComponent(imageRef);
     size_t bitsPerPixel = CGImageGetBitsPerPixel(imageRef);
     size_t components = bitsPerPixel / bitsPerComponent;
-    size_t bytesPerRow = CGImageGetBytesPerRow(imageRef);
+    __unused size_t bytesPerRow = CGImageGetBytesPerRow(imageRef);
     CGBitmapInfo bitmapInfo = CGImageGetBitmapInfo(imageRef);
     CGImageAlphaInfo alphaInfo = bitmapInfo & kCGBitmapAlphaInfoMask;
     CGBitmapInfo byteOrderInfo = bitmapInfo & kCGBitmapByteOrderMask;
-    BOOL hasAlpha = !(alphaInfo == kCGImageAlphaNone ||
+    __unused BOOL hasAlpha = !(alphaInfo == kCGImageAlphaNone ||
                       alphaInfo == kCGImageAlphaNoneSkipFirst ||
                       alphaInfo == kCGImageAlphaNoneSkipLast);
     BOOL byteOrderNormal = NO;
@@ -528,17 +508,6 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
         } break;
         default: break;
     }
-    // If we can not get bitmap buffer, early return
-    CGDataProviderRef dataProvider = CGImageGetDataProvider(imageRef);
-    if (!dataProvider) {
-        return nil;
-    }
-    
-    NSData *buffer = (__bridge_transfer NSData *) CGDataProviderCopyData(dataProvider);
-    if (!buffer) {
-        return nil;
-    }
-    
     // We must prefer the input CGImage's color space, which may contains ICC profile
     CGColorSpaceRef colorSpace = CGImageGetColorSpace(imageRef);
     // We only supports RGB colorspace, filter the un-supported one (like Monochrome, CMYK, etc)
@@ -551,75 +520,49 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
         colorSpace = [SDImageCoderHelper colorSpaceGetDeviceRGB];
     }
     CGColorRenderingIntent renderingIntent = CGImageGetRenderingIntent(imageRef);
-//    uint8_t *rgba = NULL; // RGBA Buffer managed by CFData, don't call `free` on it, instead call `CFRelease` on `dataRef`
-//    vImage_CGImageFormat destFormat = {
-//        .bitsPerComponent = 8,
-//        .bitsPerPixel = hasAlpha ? 32 : 24,
-//        .colorSpace = colorSpace,
-//        .bitmapInfo = hasAlpha ? kCGImageAlphaLast | kCGBitmapByteOrderDefault : kCGImageAlphaNone | kCGBitmapByteOrderDefault, // RGB888/RGBA8888 (Non-premultiplied to works for libwebp)
-//        .renderingIntent = renderingIntent
-//    };
-//    vImage_Buffer dest;
-//    // We could not assume that input CGImage's color mode is always RGB888/RGBA8888. Convert all other cases to target color mode using vImage
-//    // But vImageBuffer_InitWithCGImage will do convert automatically (unless you use `kvImageNoAllocate`), so no need to call `vImageConvert` by ourselves
-//    vImage_Error error = vImageBuffer_InitWithCGImage(&dest, &destFormat, NULL, imageRef, kvImageNoFlags);
-//    if (error != kvImageNoError) {
-//        return nil;
-//    }
-//    rgba = dest.data;
-//    bytesPerRow = dest.rowBytes;
-    
-    JxlBasicInfo info;
-    JxlColorEncoding jxl_color;
-    JxlPixelFormat jxl_fmt;
-    __block JxlEncoderStatus jret;
-    
-    // encoder
-    JxlEncoder* enc = JxlEncoderCreate(NULL);
-    if (!enc) {
-        return nil;
-    }
-    
-    /* populate the basic info settings */
-    JxlEncoderInitBasicInfo(&info);
     
     /* Parse the extra options */
     NSDictionary *frameSetting = options[SDImageCoderEncodeJXLFrameSetting];
     BOOL loseless = options[SDImageCoderEncodeJXLLoseless] ? [options[SDImageCoderEncodeJXLLoseless] boolValue] : NO;
     int codeStreamLevel = options[SDImageCoderEncodeJXLCodeStreamLevel] ? [options[SDImageCoderEncodeJXLCodeStreamLevel] intValue] : -1;
     
-    float distance;
-    if (options[SDImageCoderEncodeJXLDistance] != nil) {
-        // prefer JXL distance
-        distance = [options[SDImageCoderEncodeJXLDistance] floatValue];
-    } else {
-        // convert JPEG quality (0-100) to JXL distance
-        distance = JxlEncoderDistanceFromQuality(quality * 100.0);
-    }
-    /* bitexact lossless requires there to be no XYB transform */
-    info.uses_original_profile = distance == 0.0;
+    __block JxlEncoderStatus jret = JXL_ENC_SUCCESS;
+    JxlBasicInfo info;
+    /* Calculate the basic info only when primary image provided */
+    JxlColorEncoding jxl_color;
     
-    jxl_fmt.num_channels = (uint32_t)components;
+    /* populate the basic info settings */
+    JxlEncoderInitBasicInfo(&info);
+    
+    // Check animation
+    if (hasAnimation) {
+        info.have_animation = 1;
+        info.animation.have_timecodes = 0;
+        info.animation.num_loops = (uint32_t)loopCount;
+        // We use 1000 ticks per seconds for now. So this convert is simple
+        info.animation.tps_numerator = 1000;
+        info.animation.tps_denominator = 1;
+    }
+    
+    /* bitexact lossless requires there to be no XYB transform */
+    info.uses_original_profile = (distance == 0.0) || loseless;
+    
     info.xsize = (uint32_t)width;
     info.ysize = (uint32_t)height;
-    info.num_extra_channels = (jxl_fmt.num_channels + 1) % 2;
-    info.num_color_channels = jxl_fmt.num_channels - info.num_extra_channels;
-    info.bits_per_sample = (uint32_t)bitsPerPixel / jxl_fmt.num_channels;
+    info.num_extra_channels = (components + 1) % 2;
+    info.num_color_channels = (uint32_t)components - info.num_extra_channels;
+    info.bits_per_sample = (uint32_t)bitsPerComponent;
     info.alpha_bits = (info.num_extra_channels > 0) * info.bits_per_sample;
     // floating point
     if (SD_OPTIONS_CONTAINS(bitmapInfo, kCGBitmapFloatComponents)) {
         info.exponent_bits_per_sample = info.bits_per_sample > 16 ? 8 : 5;
         info.alpha_exponent_bits = info.alpha_bits ? info.exponent_bits_per_sample : 0;
-        jxl_fmt.data_type = info.bits_per_sample > 16 ? JXL_TYPE_FLOAT : JXL_TYPE_FLOAT16;
     } else {
         info.exponent_bits_per_sample = 0;
         info.alpha_exponent_bits = 0;
-        jxl_fmt.data_type = info.bits_per_sample <= 8 ? JXL_TYPE_UINT8 : JXL_TYPE_UINT16;
     }
     // EXIF orientation, matched
     info.orientation = (JxlOrientation)orientation;
-    // default endian (little)
-    jxl_fmt.endianness = JXL_NATIVE_ENDIAN;
     /* rendering intent doesn't matter here
      * but libjxl will whine if we don't set it */
     JxlRenderingIntent render_indent;
@@ -640,13 +583,9 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
     }
     jxl_color.rendering_intent = render_indent;
     
-    // CGImage has its own alignment, since we don't use vImage to re-align the input buffer, don't apply here
-    jxl_fmt.align = 0;
-    
     jret = JxlEncoderSetBasicInfo(enc, &info);
     if (jret != JXL_ENC_SUCCESS) {
-        JxlEncoderDestroy(enc);
-        return nil;
+        return jret;
     }
     
     jxl_color.color_space = JXL_COLOR_SPACE_RGB;
@@ -654,17 +593,19 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
     NSData *iccProfile = (__bridge_transfer NSData *)CGColorSpaceCopyICCProfile(colorSpace);
     jret = JxlEncoderSetICCProfile(enc, iccProfile.bytes, iccProfile.length);
     if (jret != JXL_ENC_SUCCESS) {
-        JxlEncoderDestroy(enc);
-        return nil;
+        return jret;
     }
     
-    /* This needs to be set each time the decoder is reset */
-    JxlEncoderFrameSettings* frame_settings = JxlEncoderFrameSettingsCreate(enc, NULL);
-    jret |= JxlEncoderSetFrameDistance(frame_settings, distance);
-    /* Set lossless */
-    jret |= JxlEncoderSetFrameLossless(frame_settings, loseless ? 1 : 0);
     /* Set code steram level */
-    jret |= JxlEncoderSetCodestreamLevel(enc, codeStreamLevel);
+    jret = JxlEncoderSetCodestreamLevel(enc, codeStreamLevel);
+    if (jret != JXL_ENC_SUCCESS) {
+        return jret;
+    }
+    
+    /* This needs to be set each time the encoder is reset */
+    jret &= JxlEncoderSetFrameDistance(frame_settings, distance);
+    /* Set lossless */
+    jret &= JxlEncoderSetFrameLossless(frame_settings, loseless ? 1 : 0);
     
     /* Set extra frame setting */
     [frameSetting enumerateKeysAndObjectsUsingBlock:^(NSNumber * _Nonnull key, NSNumber * _Nonnull value, BOOL * _Nonnull stop) {
@@ -673,20 +614,18 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
         if ([[value stringValue] containsString:@"."]) {
             // floating point value
             double frame_value = value.doubleValue;
-            jret |= JxlEncoderFrameSettingsSetFloatOption(frame_settings, frame_key, frame_value);
+            jret &= JxlEncoderFrameSettingsSetFloatOption(frame_settings, frame_key, frame_value);
         } else {
             // integer value
             int64_t frame_value = value.integerValue;
-            jret |= JxlEncoderFrameSettingsSetOption(frame_settings, frame_key, frame_value);
+            jret &= JxlEncoderFrameSettingsSetOption(frame_settings, frame_key, frame_value);
         }
     }];
-
     if (jret != JXL_ENC_SUCCESS) {
-        JxlEncoderDestroy(enc);
-        return nil;
+        return jret;
     }
     
-    /* This needs to be set each time the decoder is reset */
+    /* This needs to be set each time the encoder is reset */
     size_t threadCount = [options[SDImageCoderEncodeJXLThreadCount] unsignedIntValue];
     if (threadCount == 0) {
         threadCount = computeHostNumLogicalCores();
@@ -694,10 +633,71 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
     if (threadCount > 1) {
         void* runner = JxlThreadParallelRunnerCreate(NULL, threadCount);
         jret = JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner);
-        if (jret != JXL_ENC_SUCCESS) {
-            JxlEncoderDestroy(enc);
-            return nil;
-        }
+    }
+    
+    return jret;
+}
+
+// Encode single frame (shared by static/animated jxl encoding)
+- (BOOL)sd_encodeFrameWithEnc:(JxlEncoder*)enc
+                frameSettings:(JxlEncoderFrameSettings *)frame_settings
+                        frame:(nullable CGImageRef)imageRef
+                  orientation:(CGImagePropertyOrientation)orientation /*useless*/
+                     duration:(double)duration
+                      options:(NSDictionary *)options
+                       output:(NSMutableData *)output
+{
+    if (!imageRef) {
+        return NO;
+    }
+    
+    // If we can not get bitmap buffer, early return
+    CGDataProviderRef dataProvider = CGImageGetDataProvider(imageRef);
+    if (!dataProvider) {
+        return NO;
+    }
+    
+    NSData *buffer = (__bridge_transfer NSData *) CGDataProviderCopyData(dataProvider);
+    if (!buffer) {
+        return NO;
+    }
+    CGBitmapInfo bitmapInfo = CGImageGetBitmapInfo(imageRef);
+    size_t bitsPerComponent = CGImageGetBitsPerComponent(imageRef);
+    size_t bitsPerPixel = CGImageGetBitsPerPixel(imageRef);
+    size_t components = bitsPerPixel / bitsPerComponent;
+    
+    JxlEncoderStatus jret = JXL_ENC_SUCCESS;
+    JxlPixelFormat jxl_fmt;
+    
+    /* Set the current frame pixel format */
+    jxl_fmt.num_channels = (uint32_t)components;
+    // CGImage has its own alignment, since we don't use vImage to re-align the input buffer, don't apply here
+    jxl_fmt.align = 0;
+    // default endian (little)
+    jxl_fmt.endianness = JXL_NATIVE_ENDIAN;
+    // floating point
+    if (SD_OPTIONS_CONTAINS(bitmapInfo, kCGBitmapFloatComponents)) {
+        jxl_fmt.data_type = bitsPerComponent > 16 ? JXL_TYPE_FLOAT : JXL_TYPE_FLOAT16;
+    } else {
+        jxl_fmt.data_type = bitsPerComponent <= 8 ? JXL_TYPE_UINT8 : JXL_TYPE_UINT16;
+    }
+
+    if (jret != JXL_ENC_SUCCESS) {
+        return NO;
+    }
+    
+    /* Set the duration to frame header, animated image only */
+    if (duration > 0) {
+        JxlFrameHeader frame_header;
+        JxlEncoderInitFrameHeader(&frame_header);
+        
+        // We use 1000 ticks per seconds for now. So this convert is simple
+        float tick_duration = duration * 1000 / 1;
+        frame_header.duration = (uint32_t)tick_duration;
+        jret = JxlEncoderSetFrameHeader(frame_settings, &frame_header);
+    }
+    if (jret != JXL_ENC_SUCCESS) {
+        return NO;
     }
     
     /* Add frame bitmap buffer */
@@ -705,21 +705,10 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
                             buffer.bytes,
                             buffer.length);
     if (jret != JXL_ENC_SUCCESS) {
-        JxlEncoderDestroy(enc);
-        return nil;
+        return NO;
     }
-    JxlEncoderCloseInput(enc);
     
-    /* libjxp support incremental encoding, but we just wait it until finished */
-    NSMutableData *output = [NSMutableData data];
-    jret = EncodeWithEncoder(enc, output);
-    
-    /*
-     * destroying the decoder also frees JxlEncoderFrameSettings
-     */
-    JxlEncoderDestroy(enc);
-    
-    return output;
+    return YES;
 }
 
 @end
