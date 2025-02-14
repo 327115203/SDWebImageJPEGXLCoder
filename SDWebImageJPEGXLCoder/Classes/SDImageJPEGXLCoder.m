@@ -29,23 +29,6 @@ extern "C" {
 }
 #endif
 
-// Should moved to SDWebImage Core
-#include <sys/sysctl.h>
-static int computeHostNumLogicalCores(void) {
-  uint32_t count;
-  size_t len = sizeof(count);
-  sysctlbyname("hw.logicalcpu", &count, &len, NULL, 0);
-  if (count < 1) {
-    int nm[2];
-    nm[0] = CTL_HW;
-    nm[1] = HW_AVAILCPU;
-    sysctl(nm, 2, &count, &len, NULL, 0);
-    if (count < 1)
-      return -1;
-  }
-  return count;
-}
-
 static void FreeImageData(void *info, const void *data, size_t size) {
     free((void *)data);
 }
@@ -386,6 +369,11 @@ static void FreeImageData(void *info, const void *data, size_t size) {
         }
         distance = JxlEncoderDistanceFromQuality(compressionQuality * 100.0);
     }
+    // calculate multithread count
+    size_t threadCount = [options[SDImageCoderEncodeJXLThreadCount] unsignedIntValue];
+    if (threadCount == 0) {
+        threadCount = JxlThreadParallelRunnerDefaultNumWorkerThreads();
+    }
     
     NSMutableData *output = [NSMutableData data];
     BOOL success = NO;
@@ -402,9 +390,14 @@ static void FreeImageData(void *info, const void *data, size_t size) {
     }
     JxlEncoderFrameSettings* frame_settings = JxlEncoderFrameSettingsCreate(enc, NULL);
     // setup basic info for whole encoding
-    JxlEncoderStatus jret = SetupEncoderForPrimaryImage(enc, frame_settings, imageRef, orientation, distance, hasAnimation, loopCount, options);
+    void* runner = NULL;
+    if (threadCount > 1) {
+        runner = JxlThreadParallelRunnerCreate(NULL, threadCount);
+    }
+    JxlEncoderStatus jret = SetupEncoderForPrimaryImage(enc, frame_settings, runner, imageRef, orientation, distance, hasAnimation, loopCount, options);
     if (jret != JXL_ENC_SUCCESS) {
         JxlEncoderDestroy(enc);
+        JxlThreadParallelRunnerDestroy(runner);
         return nil;
     }
     
@@ -413,6 +406,7 @@ static void FreeImageData(void *info, const void *data, size_t size) {
         success = [self sd_encodeFrameWithEnc:enc frameSettings:frame_settings frame:imageRef orientation:orientation duration:0 options:options output:output];
         if (!success) {
             JxlEncoderDestroy(enc);
+            JxlThreadParallelRunnerDestroy(runner);
             return nil;
         }
         // finish input and ready for output
@@ -430,6 +424,7 @@ static void FreeImageData(void *info, const void *data, size_t size) {
             // earily break
             if (!success) {
                 JxlEncoderDestroy(enc);
+                JxlThreadParallelRunnerDestroy(runner);
                 return nil;
             }
             // last frame
@@ -448,6 +443,7 @@ static void FreeImageData(void *info, const void *data, size_t size) {
     // destroying the decoder also frees JxlEncoderFrameSettings
 //    free(frame_settings);
     JxlEncoderDestroy(enc);
+    JxlThreadParallelRunnerDestroy(runner);
     
     if (jret != JXL_ENC_SUCCESS) {
         return nil;
@@ -456,7 +452,7 @@ static void FreeImageData(void *info, const void *data, size_t size) {
 }
 
 // see: https://github.com/libjxl/libjxl/blob/main/lib/jxl/roundtrip_test.cc#L165
-JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
+static JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
     // increase output buffer by 64 bytes once a time
     [compressed increaseLengthBy:64];
     uint8_t* next_out = compressed.mutableBytes;
@@ -482,7 +478,7 @@ JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compressed) {
     return JXL_ENC_SUCCESS;
 }
 
-JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderFrameSettings *frame_settings, CGImageRef imageRef, CGImagePropertyOrientation orientation, float distance, BOOL hasAnimation, NSUInteger loopCount, NSDictionary *options) {
+static JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderFrameSettings *frame_settings, void* runner, CGImageRef imageRef, CGImagePropertyOrientation orientation, float distance, BOOL hasAnimation, NSUInteger loopCount, NSDictionary *options) {
     // bitmap info from CGImage
     size_t width = CGImageGetWidth(imageRef);
     size_t height = CGImageGetHeight(imageRef);
@@ -625,13 +621,7 @@ JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderFrameSet
         return jret;
     }
     
-    /* This needs to be set each time the encoder is reset */
-    size_t threadCount = [options[SDImageCoderEncodeJXLThreadCount] unsignedIntValue];
-    if (threadCount == 0) {
-        threadCount = computeHostNumLogicalCores();
-    }
-    if (threadCount > 1) {
-        void* runner = JxlThreadParallelRunnerCreate(NULL, threadCount);
+    if (runner) {
         jret = JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner);
     }
     

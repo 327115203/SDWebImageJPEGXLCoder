@@ -11,6 +11,12 @@
 #import <SDWebImage/SDWebImage.h>
 #import <libjxl/jxl/encode.h>
 
+static void WriteTempJXLFile(NSData *data, NSString *filename) {
+    NSString *tempOutputPath = [NSTemporaryDirectory() stringByAppendingPathComponent:filename];
+    [data writeToFile:tempOutputPath atomically:YES];
+    NSLog(@"Written encoded JXL to : %@", tempOutputPath);
+}
+
 @interface SDViewController ()
 @property (nonatomic, strong) UIImageView *imageView1;
 @property (nonatomic, strong) UIImageView *imageView2;
@@ -48,10 +54,7 @@
             NSData *jxlData = [SDImageJPEGXLCoder.sharedCoder encodedDataWithImage:image format:SDImageFormatJPEGXL options:@{SDImageCoderEncodeMaxFileSize : @(maxFileSize)}];
             if (jxlData) {
                 NSLog(@"Static JPEG-XL encode success, bytes: %lu", (unsigned long)jxlData.length);
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    UIImage *animatedImage = [UIImage sd_imageWithData:jxlData];
-                    self.imageView2.image = animatedImage;
-                });
+                WriteTempJXLFile(jxlData, imageURL.lastPathComponent);
             }
         });
     }];
@@ -66,6 +69,7 @@
             }];
             if (jxlData) {
                 NSLog(@"Animated JPEG-XL encode success, bytes: %lu", (unsigned long)jxlData.length);
+                WriteTempJXLFile(jxlData, imageURL.lastPathComponent);
             }
         });
     }];
@@ -92,19 +96,17 @@
 - (void)encodeJXLWithImage:(UIImage *)image {
     NSCParameterAssert(image);
     NSDictionary *frameSetting = @{
-        @(JXL_ENC_FRAME_SETTING_EFFORT) : @(10),
-        @(JXL_ENC_FRAME_SETTING_BROTLI_EFFORT) : @(11)
+        @(JXL_ENC_FRAME_SETTING_EFFORT) : @(7),
+//        @(JXL_ENC_FRAME_SETTING_BROTLI_EFFORT) : @(11)
     };
     // fastest encoding speed but largest compressed size, you can adjust options here
     NSData *data = [SDImageJPEGXLCoder.sharedCoder encodedDataWithImage:image format:SDImageFormatJPEGXL options:@{
 //        SDImageCoderEncodeCompressionQuality : @0.68,
-        SDImageCoderEncodeJXLDistance : @(3.0),
+        SDImageCoderEncodeJXLDistance : @(1.0),
         SDImageCoderEncodeJXLFrameSetting : frameSetting,
     }];
     NSCParameterAssert(data);
-    NSString *tempOutputPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"iso-hdr-demo.jxl"];
-    [data writeToFile:tempOutputPath atomically:YES];
-    NSLog(@"Written encoded JXL to : %@", tempOutputPath);
+    WriteTempJXLFile(data, @"iso-hdr-demo.jxl");
     
     CIImage *ciimage = [CIImage imageWithData:data];
     NSString *desc = [ciimage description];
