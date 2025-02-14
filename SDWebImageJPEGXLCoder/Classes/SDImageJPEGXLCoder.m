@@ -246,29 +246,33 @@ static void FreeImageData(void *info, const void *data, size_t size) {
     BOOL hasAlpha = info.alpha_bits != 0;
     BOOL premultiplied = info.alpha_premultiplied;
     SDImagePixelFormat pixelFormat = [SDImageCoderHelper preferredPixelFormat:hasAlpha];
-    JxlDataType dataType;
     
     // 16 bit or 8 bit, HDR ?
-    CGBitmapInfo bitmapInfo = pixelFormat.bitmapInfo;
-    CGImageByteOrderInfo byteOrderInfo = bitmapInfo & kCGBitmapByteOrderMask;
+    JxlDataType data_type;
+    CGBitmapInfo bitmapInfo = 0;
     size_t alignment = pixelFormat.alignment;
-    size_t components = hasAlpha ? 4 : 3;
-    size_t bitsPerComponent;
-    if (bitmapInfo & kCGBitmapFloatComponents) {
-        // float16 HDR
-        dataType = JXL_TYPE_FLOAT16;
-        bitsPerComponent = 16;
-        bitmapInfo = kCGBitmapByteOrderDefault | kCGBitmapFloatComponents;
-    } else if (byteOrderInfo == kCGBitmapByteOrder16Big || byteOrderInfo == kCGBitmapByteOrder16Little) {
-        // uint16 HDR
-        dataType = JXL_TYPE_UINT16;
-        bitsPerComponent = 16;
-        bitmapInfo = kCGBitmapByteOrder16Host;
+    size_t components = info.num_color_channels + info.num_extra_channels;
+    size_t bitsPerComponent = info.bits_per_sample;
+    if (info.exponent_bits_per_sample > 0 || info.alpha_exponent_bits > 0) {
+        // float HDR
+        data_type = bitsPerComponent > 16 ? JXL_TYPE_FLOAT : JXL_TYPE_FLOAT16;
+        bitmapInfo |= kCGBitmapFloatComponents;
     } else {
-        // uint8 SDR
-        dataType = JXL_TYPE_UINT8;
-        bitsPerComponent = 8;
-        bitmapInfo = kCGBitmapByteOrderDefault;
+        // uint
+        data_type = bitsPerComponent <= 8 ? JXL_TYPE_UINT8 : JXL_TYPE_UINT16;
+    }
+    
+    switch (data_type) {
+        case JXL_TYPE_FLOAT:
+            bitmapInfo |= kCGBitmapByteOrder32Host;
+            break;
+        case JXL_TYPE_FLOAT16:
+        case JXL_TYPE_UINT16:
+            bitmapInfo |= kCGBitmapByteOrder16Host;
+            break;
+        case JXL_TYPE_UINT8:
+            bitmapInfo |= kCGBitmapByteOrderDefault;
+            break;
     }
     // libjxl now always prefer RGB / RGBA order
     if (hasAlpha) {
@@ -282,7 +286,7 @@ static void FreeImageData(void *info, const void *data, size_t size) {
     }
     JxlPixelFormat format = {
         .num_channels = (uint32_t)components,
-        .data_type = dataType,
+        .data_type = data_type,
         .endianness = JXL_NATIVE_ENDIAN,
         .align = alignment
     };
@@ -403,7 +407,7 @@ static void FreeImageData(void *info, const void *data, size_t size) {
     
     if (!hasAnimation) {
         // for static single jxl
-        success = [self sd_encodeFrameWithEnc:enc frameSettings:frame_settings frame:imageRef orientation:orientation duration:0 options:options output:output];
+        success = [self sd_encodeFrameWithEnc:enc frameSettings:frame_settings frame:imageRef orientation:orientation duration:0];
         if (!success) {
             JxlEncoderDestroy(enc);
             JxlThreadParallelRunnerDestroy(runner);
@@ -420,7 +424,7 @@ static void FreeImageData(void *info, const void *data, size_t size) {
             UIImage *currentImage = currentFrame.image;
             double duration = currentFrame.duration;
             
-            success = [self sd_encodeFrameWithEnc:enc frameSettings:frame_settings frame:currentImage.CGImage orientation:orientation duration:duration options:options output:output];
+            success = [self sd_encodeFrameWithEnc:enc frameSettings:frame_settings frame:currentImage.CGImage orientation:orientation duration:duration];
             // earily break
             if (!success) {
                 JxlEncoderDestroy(enc);
@@ -467,7 +471,6 @@ static JxlEncoderStatus EncodeWithEncoder(JxlEncoder* enc, NSMutableData *compre
             next_out = (uint8_t *)compressed.mutableBytes + offset;
             avail_out = compressed.length - offset;
         } else if (process_result == JXL_ENC_ERROR){
-            NSLog(@"Failed to encode JXL");
             return process_result;
         }
     }
@@ -487,23 +490,6 @@ static JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderF
     size_t components = bitsPerPixel / bitsPerComponent;
     __unused size_t bytesPerRow = CGImageGetBytesPerRow(imageRef);
     CGBitmapInfo bitmapInfo = CGImageGetBitmapInfo(imageRef);
-    CGImageAlphaInfo alphaInfo = bitmapInfo & kCGBitmapAlphaInfoMask;
-    CGBitmapInfo byteOrderInfo = bitmapInfo & kCGBitmapByteOrderMask;
-    __unused BOOL hasAlpha = !(alphaInfo == kCGImageAlphaNone ||
-                      alphaInfo == kCGImageAlphaNoneSkipFirst ||
-                      alphaInfo == kCGImageAlphaNoneSkipLast);
-    BOOL byteOrderNormal = NO;
-    switch (byteOrderInfo) {
-        case kCGBitmapByteOrderDefault: {
-            byteOrderNormal = YES;
-        } break;
-        case kCGBitmapByteOrder32Little: {
-        } break;
-        case kCGBitmapByteOrder32Big: {
-            byteOrderNormal = YES;
-        } break;
-        default: break;
-    }
     // We must prefer the input CGImage's color space, which may contains ICC profile
     CGColorSpaceRef colorSpace = CGImageGetColorSpace(imageRef);
     // We only supports RGB colorspace, filter the un-supported one (like Monochrome, CMYK, etc)
@@ -522,10 +508,9 @@ static JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderF
     BOOL loseless = options[SDImageCoderEncodeJXLLoseless] ? [options[SDImageCoderEncodeJXLLoseless] boolValue] : NO;
     int codeStreamLevel = options[SDImageCoderEncodeJXLCodeStreamLevel] ? [options[SDImageCoderEncodeJXLCodeStreamLevel] intValue] : -1;
     
+    /* Calculate the basic info only when primary image provided */
     __block JxlEncoderStatus jret = JXL_ENC_SUCCESS;
     JxlBasicInfo info;
-    /* Calculate the basic info only when primary image provided */
-    JxlColorEncoding jxl_color;
     
     /* populate the basic info settings */
     JxlEncoderInitBasicInfo(&info);
@@ -577,23 +562,15 @@ static JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderF
             render_indent = JXL_RENDERING_INTENT_SATURATION;
             break;
     }
-    jxl_color.rendering_intent = render_indent;
     
     jret = JxlEncoderSetBasicInfo(enc, &info);
     if (jret != JXL_ENC_SUCCESS) {
         return jret;
     }
     
-    jxl_color.color_space = JXL_COLOR_SPACE_RGB;
     // ICC Profile
     NSData *iccProfile = (__bridge_transfer NSData *)CGColorSpaceCopyICCProfile(colorSpace);
     jret = JxlEncoderSetICCProfile(enc, iccProfile.bytes, iccProfile.length);
-    if (jret != JXL_ENC_SUCCESS) {
-        return jret;
-    }
-    
-    /* Set code steram level */
-    jret = JxlEncoderSetCodestreamLevel(enc, codeStreamLevel);
     if (jret != JXL_ENC_SUCCESS) {
         return jret;
     }
@@ -602,6 +579,11 @@ static JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderF
     jret &= JxlEncoderSetFrameDistance(frame_settings, distance);
     /* Set lossless */
     jret &= JxlEncoderSetFrameLossless(frame_settings, loseless ? 1 : 0);
+    /* Set code steram level */
+    jret = JxlEncoderSetCodestreamLevel(enc, codeStreamLevel);
+    if (jret != JXL_ENC_SUCCESS) {
+        return jret;
+    }
     
     /* Set extra frame setting */
     [frameSetting enumerateKeysAndObjectsUsingBlock:^(NSNumber * _Nonnull key, NSNumber * _Nonnull value, BOOL * _Nonnull stop) {
@@ -628,31 +610,13 @@ static JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderF
     return jret;
 }
 
-// Encode single frame (shared by static/animated jxl encoding)
-- (BOOL)sd_encodeFrameWithEnc:(JxlEncoder*)enc
-                frameSettings:(JxlEncoderFrameSettings *)frame_settings
-                        frame:(nullable CGImageRef)imageRef
-                  orientation:(CGImagePropertyOrientation)orientation /*useless*/
-                     duration:(double)duration
-                      options:(NSDictionary *)options
-                       output:(NSMutableData *)output
-{
-    if (!imageRef) {
-        return NO;
-    }
+static vImage_Error ConvertToRGBABuffer(CGImageRef imageRef, vImage_Buffer *dest) {
     // bitmap info from CGImage
-    __unused size_t width = CGImageGetWidth(imageRef);
-    size_t height = CGImageGetHeight(imageRef);
     size_t bitsPerComponent = CGImageGetBitsPerComponent(imageRef);
     size_t bitsPerPixel = CGImageGetBitsPerPixel(imageRef);
-    size_t components = bitsPerPixel / bitsPerComponent;
-    size_t bytesPerRow = CGImageGetBytesPerRow(imageRef);
     CGBitmapInfo bitmapInfo = CGImageGetBitmapInfo(imageRef);
     CGImageAlphaInfo alphaInfo = bitmapInfo & kCGBitmapAlphaInfoMask;
     CGImageByteOrderInfo byteOrderInfo = bitmapInfo & kCGBitmapByteOrderMask;
-    BOOL hasAlpha = !(alphaInfo == kCGImageAlphaNone ||
-                      alphaInfo == kCGImageAlphaNoneSkipFirst ||
-                      alphaInfo == kCGImageAlphaNoneSkipLast);
     BOOL byteOrderNormal = NO;
     switch (byteOrderInfo) {
         case kCGBitmapByteOrderDefault: {
@@ -677,30 +641,16 @@ static JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderF
     }
     CGColorRenderingIntent renderingIntent = CGImageGetRenderingIntent(imageRef);
     
-    // TODO: ugly code, libjxl supports RGBA order only, but input CGImage maybe BGRA, ARGB, etc
-    // see: encode.h JxlDataType
-    // * TODO(lode): support different channel orders if needed (RGB, BGR, ...)
     // Begin here vImage <---
-    // RGB888/RGBA8888 (Non-premultiplied to works for libjxl)
-    CGImageAlphaInfo destAlphaInfo;
-    if (hasAlpha) {
-        if (components == 4) {
-            destAlphaInfo = kCGImageAlphaLast;
-        } else if (components == 1) {
-            destAlphaInfo = kCGImageAlphaOnly;
-        } else {
-            // Unsupported!
-            destAlphaInfo = alphaInfo;
-        }
+    CGImageAlphaInfo destAlphaInfo = alphaInfo;
+    if (alphaInfo == kCGImageAlphaNoneSkipLast || alphaInfo == kCGImageAlphaNoneSkipFirst) {
+        destAlphaInfo = kCGImageAlphaNoneSkipLast;
+    } else if (alphaInfo == kCGImageAlphaLast || alphaInfo == kCGImageAlphaFirst) {
+        destAlphaInfo = kCGImageAlphaLast;
+    } else if (alphaInfo == kCGImageAlphaPremultipliedLast || alphaInfo == kCGImageAlphaPremultipliedFirst) {
+        destAlphaInfo = kCGImageAlphaLast;
     } else {
-        if (components == 4) {
-            destAlphaInfo = kCGImageAlphaNoneSkipLast;
-        } else if (components == 3) {
-            destAlphaInfo = kCGImageAlphaNone;
-        } else {
-            // Unsupported!
-            destAlphaInfo = alphaInfo;
-        }
+        destAlphaInfo = alphaInfo;
     }
     CGImageByteOrderInfo destByteOrderInfo = byteOrderInfo;
     if (!byteOrderNormal) {
@@ -716,7 +666,6 @@ static JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderF
         destBitmapInfo |= kCGBitmapFloatComponents;
     }
     
-    uint8_t *rgba = NULL; // RGBA Buffer managed by CFData, don't call `free` on it, instead call `CFRelease` on `dataRef`
     vImage_CGImageFormat destFormat = {
         .bitsPerComponent = (uint32_t)bitsPerComponent,
         .bitsPerPixel = (uint32_t)bitsPerPixel,
@@ -724,25 +673,63 @@ static JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderF
         .bitmapInfo = destBitmapInfo,
         .renderingIntent = renderingIntent
     };
-    vImage_Buffer dest;
     // We could not assume that input CGImage's color mode is always RGB888/RGBA8888. Convert all other cases to target color mode using vImage
     // But vImageBuffer_InitWithCGImage will do convert automatically (unless you use `kvImageNoAllocate`), so no need to call `vImageConvert` by ourselves
-    vImage_Error error = vImageBuffer_InitWithCGImage(&dest, &destFormat, NULL, imageRef, kvImageNoFlags);
-    if (error != kvImageNoError) {
+    vImage_Error error = vImageBuffer_InitWithCGImage(dest, &destFormat, NULL, imageRef, kvImageNoFlags);
+    return error;
+    // End here vImage --->
+}
+
+// Encode single frame (shared by static/animated jxl encoding)
+- (BOOL)sd_encodeFrameWithEnc:(JxlEncoder*)enc
+                frameSettings:(JxlEncoderFrameSettings *)frame_settings
+                        frame:(nullable CGImageRef)imageRef
+                  orientation:(CGImagePropertyOrientation)orientation /*useless*/
+                     duration:(double)duration
+{
+    if (!imageRef) {
         return NO;
     }
-    rgba = dest.data;
-    bytesPerRow = dest.rowBytes;
-    size_t rgba_size = bytesPerRow * height;
-    // End here vImage --->
+    
+    size_t width = CGImageGetWidth(imageRef);
+    size_t height = CGImageGetHeight(imageRef);
+    size_t bitsPerComponent = CGImageGetBitsPerComponent(imageRef);
+    size_t bitsPerPixel = CGImageGetBitsPerPixel(imageRef);
+    size_t components = bitsPerPixel / bitsPerComponent;
+    size_t bytesPerRow = CGImageGetBytesPerRow(imageRef);
+    CGBitmapInfo bitmapInfo = CGImageGetBitmapInfo(imageRef);
+    
+    CFDataRef buffer;
+    // is HDR or not ?
+    if (bitsPerComponent < 16) {
+        // TODO: ugly code, libjxl supports RGBA order only, but input CGImage maybe BGRA, ARGB, etc
+        // see: encode.h JxlDataType
+        // * TODO(lode): support different channel orders if needed (RGB, BGR, ...)
+        vImage_Buffer dest;
+        vImage_Error error = ConvertToRGBABuffer(imageRef, &dest);
+        if (error != kvImageNoError) {
+            return NO;
+        }
+        bytesPerRow = dest.rowBytes;
+        size_t length = bytesPerRow * height;
+        buffer = CFDataCreateWithBytesNoCopy(kCFAllocatorDefault, dest.data, length, kCFAllocatorDefault);
+    } else {
+        // directlly use the CGImage's buffer, preserve HDR
+        CGDataProviderRef provider = CGImageGetDataProvider(imageRef);
+        if (!provider) {
+            return NO;
+        }
+        buffer = CGDataProviderCopyData(provider);
+        CGDataProviderRelease(provider);
+    }
     
     JxlEncoderStatus jret = JXL_ENC_SUCCESS;
     JxlPixelFormat jxl_fmt;
     
     /* Set the current frame pixel format */
     jxl_fmt.num_channels = (uint32_t)components;
-    // CGImage has its own alignment, since we don't use vImage to re-align the input buffer, don't apply here
-    size_t alignment = (bitsPerComponent / 8) * components * 8;
+    // TODO: we use vImage, so the align should re-calculate
+    size_t alignment = bytesPerRow - (width * bitsPerPixel / 8);
     jxl_fmt.align = alignment;
     // default endian (little)
     jxl_fmt.endianness = JXL_NATIVE_ENDIAN;
@@ -773,10 +760,10 @@ static JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderF
     
     /* Add frame bitmap buffer */
     jret = JxlEncoderAddImageFrame(frame_settings, &jxl_fmt,
-                                   rgba,
-                                   rgba_size);
-    // free the vImage allocated buffer
-    free(rgba);
+                                   CFDataGetBytePtr(buffer),
+                                   CFDataGetLength(buffer));
+    // free the allocated buffer
+    CFRelease(buffer);
     if (jret != JXL_ENC_SUCCESS) {
         return NO;
     }
