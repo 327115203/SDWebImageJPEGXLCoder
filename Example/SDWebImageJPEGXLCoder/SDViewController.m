@@ -55,24 +55,20 @@
             }
         });
     }];
-//    [self.imageView2 sd_setImageWithURL:animatedURL placeholderImage:nil completed:^(UIImage * _Nullable image, NSError * _Nullable error, SDImageCacheType cacheType, NSURL * _Nullable imageURL) {
-//        if (image) {
-//            NSLog(@"%@", @"Animated JPEG-XL load success");
-//        }
-//        // animated JXL encoding
-//        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-//            NSData *jxlData = [SDImageJPEGXLCoder.sharedCoder encodedDataWithImage:image format:SDImageFormatJPEGXL options:@{
-//                SDImageCoderEncodeJXLDistance : @(3.0),
-//            }];
-//            if (jxlData) {
-//                NSLog(@"Animated JPEG-XL encode success, bytes: %lu", (unsigned long)jxlData.length);
-//                dispatch_async(dispatch_get_main_queue(), ^{
-//                    UIImage *animatedImage = [UIImage sd_imageWithData:jxlData];
-//                    self.imageView1.image = animatedImage;
-//                });
-//            }
-//        });
-//    }];
+    [self.imageView2 sd_setImageWithURL:animatedURL placeholderImage:nil completed:^(UIImage * _Nullable image, NSError * _Nullable error, SDImageCacheType cacheType, NSURL * _Nullable imageURL) {
+        if (image) {
+            NSLog(@"%@", @"Animated JPEG-XL load success");
+        }
+        // animated JXL encoding
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            NSData *jxlData = [SDImageJPEGXLCoder.sharedCoder encodedDataWithImage:image format:SDImageFormatJPEGXL options:@{
+                SDImageCoderEncodeJXLDistance : @(3.0),
+            }];
+            if (jxlData) {
+                NSLog(@"Animated JPEG-XL encode success, bytes: %lu", (unsigned long)jxlData.length);
+            }
+        });
+    }];
     
     [self testHDREncoding];
 }
