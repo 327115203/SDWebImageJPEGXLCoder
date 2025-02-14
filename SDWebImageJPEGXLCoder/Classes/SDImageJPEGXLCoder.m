@@ -650,21 +650,101 @@ JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderFrameSet
     if (!imageRef) {
         return NO;
     }
-    
-    // If we can not get bitmap buffer, early return
-    CGDataProviderRef dataProvider = CGImageGetDataProvider(imageRef);
-    if (!dataProvider) {
-        return NO;
-    }
-    
-    NSData *buffer = (__bridge_transfer NSData *) CGDataProviderCopyData(dataProvider);
-    if (!buffer) {
-        return NO;
-    }
-    CGBitmapInfo bitmapInfo = CGImageGetBitmapInfo(imageRef);
+    // bitmap info from CGImage
+    __unused size_t width = CGImageGetWidth(imageRef);
+    size_t height = CGImageGetHeight(imageRef);
     size_t bitsPerComponent = CGImageGetBitsPerComponent(imageRef);
     size_t bitsPerPixel = CGImageGetBitsPerPixel(imageRef);
     size_t components = bitsPerPixel / bitsPerComponent;
+    size_t bytesPerRow = CGImageGetBytesPerRow(imageRef);
+    CGBitmapInfo bitmapInfo = CGImageGetBitmapInfo(imageRef);
+    CGImageAlphaInfo alphaInfo = bitmapInfo & kCGBitmapAlphaInfoMask;
+    CGImageByteOrderInfo byteOrderInfo = bitmapInfo & kCGBitmapByteOrderMask;
+    BOOL hasAlpha = !(alphaInfo == kCGImageAlphaNone ||
+                      alphaInfo == kCGImageAlphaNoneSkipFirst ||
+                      alphaInfo == kCGImageAlphaNoneSkipLast);
+    BOOL byteOrderNormal = NO;
+    switch (byteOrderInfo) {
+        case kCGBitmapByteOrderDefault: {
+            byteOrderNormal = YES;
+        } break;
+        case kCGBitmapByteOrder16Little:
+        case kCGBitmapByteOrder32Little: {
+        } break;
+        case kCGBitmapByteOrder16Big:
+        case kCGBitmapByteOrder32Big: {
+            byteOrderNormal = YES;
+        } break;
+        default: break;
+    }
+    // We must prefer the input CGImage's color space, which may contains ICC profile
+    CGColorSpaceRef colorSpace = CGImageGetColorSpace(imageRef);
+    // We only supports RGB colorspace, filter the un-supported one (like Monochrome, CMYK, etc)
+    if (CGColorSpaceGetModel(colorSpace) != kCGColorSpaceModelRGB) {
+        // Ignore and convert, we don't know how to encode this colorspace directlly to WebP
+        // This may cause little visible difference because of colorpsace conversion
+        colorSpace = NULL;
+    }
+    CGColorRenderingIntent renderingIntent = CGImageGetRenderingIntent(imageRef);
+    
+    // TODO: ugly code, libjxl supports RGBA order only, but input CGImage maybe BGRA, ARGB, etc
+    // see: encode.h JxlDataType
+    // * TODO(lode): support different channel orders if needed (RGB, BGR, ...)
+    // Begin here vImage <---
+    // RGB888/RGBA8888 (Non-premultiplied to works for libjxl)
+    CGImageAlphaInfo destAlphaInfo;
+    if (hasAlpha) {
+        if (components == 4) {
+            destAlphaInfo = kCGImageAlphaLast;
+        } else if (components == 1) {
+            destAlphaInfo = kCGImageAlphaOnly;
+        } else {
+            // Unsupported!
+            destAlphaInfo = alphaInfo;
+        }
+    } else {
+        if (components == 4) {
+            destAlphaInfo = kCGImageAlphaNoneSkipLast;
+        } else if (components == 3) {
+            destAlphaInfo = kCGImageAlphaNone;
+        } else {
+            // Unsupported!
+            destAlphaInfo = alphaInfo;
+        }
+    }
+    CGImageByteOrderInfo destByteOrderInfo = byteOrderInfo;
+    if (!byteOrderNormal) {
+        // not RGB order, need reverse...
+        if (byteOrderInfo == kCGImageByteOrder16Little) {
+            destByteOrderInfo = kCGImageByteOrder16Big;
+        } else if (byteOrderInfo == kCGImageByteOrder32Little) {
+            destByteOrderInfo = kCGImageByteOrder32Big;
+        }
+    }
+    CGBitmapInfo destBitmapInfo = (CGBitmapInfo)destAlphaInfo | (CGBitmapInfo)destByteOrderInfo;
+    if (SD_OPTIONS_CONTAINS(bitmapInfo, kCGBitmapFloatComponents)) {
+        destBitmapInfo |= kCGBitmapFloatComponents;
+    }
+    
+    uint8_t *rgba = NULL; // RGBA Buffer managed by CFData, don't call `free` on it, instead call `CFRelease` on `dataRef`
+    vImage_CGImageFormat destFormat = {
+        .bitsPerComponent = (uint32_t)bitsPerComponent,
+        .bitsPerPixel = (uint32_t)bitsPerPixel,
+        .colorSpace = colorSpace,
+        .bitmapInfo = destBitmapInfo,
+        .renderingIntent = renderingIntent
+    };
+    vImage_Buffer dest;
+    // We could not assume that input CGImage's color mode is always RGB888/RGBA8888. Convert all other cases to target color mode using vImage
+    // But vImageBuffer_InitWithCGImage will do convert automatically (unless you use `kvImageNoAllocate`), so no need to call `vImageConvert` by ourselves
+    vImage_Error error = vImageBuffer_InitWithCGImage(&dest, &destFormat, NULL, imageRef, kvImageNoFlags);
+    if (error != kvImageNoError) {
+        return NO;
+    }
+    rgba = dest.data;
+    bytesPerRow = dest.rowBytes;
+    size_t rgba_size = bytesPerRow * height;
+    // End here vImage --->
     
     JxlEncoderStatus jret = JXL_ENC_SUCCESS;
     JxlPixelFormat jxl_fmt;
@@ -672,7 +752,8 @@ JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderFrameSet
     /* Set the current frame pixel format */
     jxl_fmt.num_channels = (uint32_t)components;
     // CGImage has its own alignment, since we don't use vImage to re-align the input buffer, don't apply here
-    jxl_fmt.align = 0;
+    size_t alignment = (bitsPerComponent / 8) * components * 8;
+    jxl_fmt.align = alignment;
     // default endian (little)
     jxl_fmt.endianness = JXL_NATIVE_ENDIAN;
     // floating point
@@ -702,8 +783,10 @@ JxlEncoderStatus SetupEncoderForPrimaryImage(JxlEncoder *enc, JxlEncoderFrameSet
     
     /* Add frame bitmap buffer */
     jret = JxlEncoderAddImageFrame(frame_settings, &jxl_fmt,
-                            buffer.bytes,
-                            buffer.length);
+                                   rgba,
+                                   rgba_size);
+    // free the vImage allocated buffer
+    free(rgba);
     if (jret != JXL_ENC_SUCCESS) {
         return NO;
     }
